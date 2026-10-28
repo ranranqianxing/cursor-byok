@@ -205,6 +205,37 @@ pub mod run_inference_server_message {
 pub struct RunInferenceRunReady {
     #[prost(message, optional, tag = "1")]
     pub resolved_model: ::core::option::Option<InferenceRequestedModel>,
+    /// Cursor 3.27's local loop will not build the invoke request without this.
+    #[prost(message, optional, tag = "4")]
+    pub prompt_model_metadata: ::core::option::Option<RunInferencePromptModelMetadata>,
+}
+
+/// Subset of `RunInferencePromptModelMetadata`.
+///
+/// `vendor` and `prompt_version` must be values this Cursor build already
+/// recognizes. `unknown` + `latest` is the client's own fallback for a model
+/// it has no family for. `use_dsv3_harness` stays unset so the loop does not
+/// require a Composer persona.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunInferencePromptModelMetadata {
+    #[prost(string, tag = "1")]
+    pub vendor: String,
+    #[prost(string, tag = "2")]
+    pub prompt_version: String,
+    #[prost(string, optional, tag = "30")]
+    pub reasoning_effort: ::core::option::Option<String>,
+    #[prost(int32, optional, tag = "32")]
+    pub agent_token_limit: ::core::option::Option<i32>,
+    #[prost(message, repeated, tag = "46")]
+    pub agent_mode_configs: ::prost::alloc::vec::Vec<RunInferenceAgentModeConfig>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunInferenceAgentModeConfig {
+    #[prost(string, tag = "1")]
+    pub mode_id: String,
+    #[prost(bool, tag = "2")]
+    pub enable_ask_question_tool: bool,
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]

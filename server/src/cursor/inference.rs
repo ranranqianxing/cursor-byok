@@ -26,9 +26,10 @@ use crate::{
                 self, inference_content_part, inference_core_message, inference_stream_response,
                 run_inference_client_message, run_inference_server_message, InferenceContentPart,
                 InferenceCoreMessage, InferenceModelParameterValue, InferenceStreamResponse,
-                InferenceTextStreamPart, InferenceThinkingStreamPart, RunInferenceInvocationEnd,
-                RunInferenceInvocationError, RunInferenceInvocationResponse, RunInferenceRunReady,
-                RunInferenceServerMessage,
+                InferenceTextStreamPart, InferenceThinkingStreamPart, RunInferenceAgentModeConfig,
+                RunInferenceInvocationEnd, RunInferenceInvocationError,
+                RunInferenceInvocationResponse, RunInferencePromptModelMetadata,
+                RunInferenceRunReady, RunInferenceServerMessage,
             },
         },
         transport::{DetachedTransport, TransportHandle, TransportRegistry},
@@ -144,6 +145,7 @@ async fn begin_run(
         "routing Cursor RunInference to BYOK provider"
     );
     let (effort, context, fast) = parameters(&model.parameters);
+    let metadata = prompt_metadata(effort.as_deref(), context);
     let session = Session {
         model_hash: model_hash.clone(),
         conversation_id: request.conversation_id.clone(),
@@ -170,6 +172,7 @@ async fn begin_run(
             message: Some(run_inference_server_message::Message::RunReady(
                 RunInferenceRunReady {
                     resolved_model: Some(model),
+                    prompt_model_metadata: Some(metadata),
                 },
             )),
         },
@@ -371,6 +374,40 @@ async fn model_is_local(registry: &TransportRegistry, model_id: &str) -> Result<
         return Ok(true);
     }
     Ok(registry.store().model(model_id).await?.is_some())
+}
+
+fn prompt_metadata(
+    reasoning_effort: Option<&str>,
+    context_window_tokens: Option<u64>,
+) -> RunInferencePromptModelMetadata {
+    const MODES: &[(&str, bool)] = &[
+        ("agent", true),
+        ("chat", false),
+        ("plan", false),
+        ("debug", false),
+        ("triage", false),
+        ("multitask", false),
+    ];
+    RunInferencePromptModelMetadata {
+        vendor: "unknown".into(),
+        prompt_version: "latest".into(),
+        reasoning_effort: reasoning_effort
+            .filter(|effort| {
+                matches!(
+                    *effort,
+                    "low" | "medium" | "high" | "extra-high" | "xhigh" | "max"
+                )
+            })
+            .map(str::to_string),
+        agent_token_limit: context_window_tokens.and_then(|tokens| i32::try_from(tokens).ok()),
+        agent_mode_configs: MODES
+            .iter()
+            .map(|(mode_id, ask)| RunInferenceAgentModeConfig {
+                mode_id: (*mode_id).into(),
+                enable_ask_question_tool: *ask,
+            })
+            .collect(),
+    }
 }
 
 fn parameters(values: &[InferenceModelParameterValue]) -> (Option<String>, Option<u64>, bool) {
@@ -751,4 +788,40 @@ fn read_varint(data: &[u8], index: &mut usize) -> Option<u64> {
         shift += 7;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+
+    use super::{prompt_metadata, RunInferenceRunReady};
+
+    #[test]
+    fn prompt_metadata_uses_the_client_fallback_family() {
+        let ready = RunInferenceRunReady {
+            resolved_model: None,
+            prompt_model_metadata: Some(prompt_metadata(Some("high"), Some(200_000))),
+        };
+        let decoded = RunInferenceRunReady::decode(ready.encode_to_vec().as_slice()).unwrap();
+        let metadata = decoded.prompt_model_metadata.unwrap();
+        assert_eq!(metadata.vendor, "unknown");
+        assert_eq!(metadata.prompt_version, "latest");
+        assert_eq!(metadata.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(metadata.agent_token_limit, Some(200_000));
+        assert!(metadata
+            .agent_mode_configs
+            .iter()
+            .any(|mode| { mode.mode_id == "agent" && mode.enable_ask_question_tool }));
+        assert!(metadata
+            .agent_mode_configs
+            .iter()
+            .any(|mode| mode.mode_id == "plan" && !mode.enable_ask_question_tool));
+    }
+
+    #[test]
+    fn unrecognized_reasoning_effort_is_omitted() {
+        let metadata = prompt_metadata(Some("turbo"), None);
+        assert!(metadata.reasoning_effort.is_none());
+        assert!(metadata.agent_token_limit.is_none());
+    }
 }
