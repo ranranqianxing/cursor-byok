@@ -19,6 +19,17 @@ pub struct DecodedAppend {
     pub message: agent::AgentClientMessage,
 }
 
+pub enum DecodedBidi {
+    Agent(Box<DecodedAppend>),
+    Inference(InferenceDecoded),
+}
+
+pub struct InferenceDecoded {
+    pub request_id: String,
+    pub seqno: i64,
+    pub message: crate::cursor::protocol::inference::RunInferenceClientMessage,
+}
+
 impl DecodedAppend {
     pub fn model_id(&self) -> Option<&str> {
         let agent::agent_client_message::Message::RunRequest(request) =
@@ -153,7 +164,7 @@ fn history_image_count(history: &agent::ConversationHistory) -> usize {
         .sum()
 }
 
-pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
+pub fn decode(request: &ai::BidiAppendRequest, known_inference: bool) -> Result<DecodedBidi> {
     let request_id = request
         .request_id
         .as_ref()
@@ -172,11 +183,43 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
     }
     let payload = hex::decode(&request.data)
         .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
-    Ok(DecodedAppend {
-        request_id: request_id.into(),
-        seqno: request.append_seqno,
-        message: agent::AgentClientMessage::decode(payload.as_slice())?,
-    })
+    if known_inference || crate::cursor::inference::is_run_request_payload(&payload) {
+        return Ok(DecodedBidi::Inference(InferenceDecoded {
+            request_id: request_id.into(),
+            seqno: request.append_seqno,
+            message: crate::cursor::protocol::inference::RunInferenceClientMessage::decode(
+                payload.as_slice(),
+            )?,
+        }));
+    }
+    match agent::AgentClientMessage::decode(payload.as_slice()) {
+        Ok(message) => Ok(DecodedBidi::Agent(Box::new(DecodedAppend {
+            request_id: request_id.into(),
+            seqno: request.append_seqno,
+            message,
+        }))),
+        Err(agent_error) => {
+            match crate::cursor::protocol::inference::RunInferenceClientMessage::decode(
+                payload.as_slice(),
+            ) {
+                Ok(message)
+                    if message.message.as_ref().is_some_and(|message| {
+                        !matches!(
+                            message,
+                            crate::cursor::protocol::inference::run_inference_client_message::Message::RunRequest(_)
+                        )
+                    }) =>
+                {
+                    Ok(DecodedBidi::Inference(InferenceDecoded {
+                        request_id: request_id.into(),
+                        seqno: request.append_seqno,
+                        message,
+                    }))
+                }
+                _ => Err(agent_error.into()),
+            }
+        }
+    }
 }
 
 pub async fn append(
@@ -208,4 +251,151 @@ pub async fn append(
         })
         .await?;
     Ok(ai::BidiAppendResponse {})
+}
+
+#[cfg(test)]
+mod tests {
+    use prost::Message;
+
+    use super::*;
+    use crate::cursor::protocol::inference::{
+        inference_content_part, inference_core_message, run_inference_client_message,
+        InferenceContentPart, InferenceContentParts, InferenceCoreMessage, InferenceImagePart,
+        InferenceRequestedModel, InferenceTextPart, RunInferenceClientMessage,
+        RunInferenceInvokeModel, RunInferenceRunRequest,
+    };
+
+    fn append(payload: &[u8]) -> ai::BidiAppendRequest {
+        ai::BidiAppendRequest {
+            data: hex::encode(payload),
+            request_id: Some(ai::BidiRequestId {
+                request_id: "request-1".into(),
+            }),
+            append_seqno: 0,
+            data_binary: Vec::new(),
+        }
+    }
+
+    fn run_request(conversation_id: &str) -> Vec<u8> {
+        let message = RunInferenceClientMessage {
+            message: Some(run_inference_client_message::Message::RunRequest(
+                RunInferenceRunRequest {
+                    conversation_id: conversation_id.into(),
+                    requested_model: Some(InferenceRequestedModel {
+                        model_id: "8e1a15e48503a207".into(),
+                        parameters: Vec::new(),
+                    }),
+                },
+            )),
+        };
+        let mut payload = Vec::new();
+        message.encode(&mut payload).unwrap();
+        payload
+    }
+
+    #[test]
+    fn run_inference_conversation_ids_do_not_decode_as_agent_state() {
+        for conversation_id in [
+            "5e7c3aa2-f7f2-46b1-a756-c60b1b98123c",
+            "b6501dee-9d99-42e1-97a5-b781d6825c04",
+            "e6501dee-9d99-42e1-97a5-b781d6825c04",
+        ] {
+            let payload = run_request(conversation_id);
+            agent::AgentClientMessage::decode(payload.as_slice()).unwrap_err();
+            let DecodedBidi::Inference(decoded) = decode(&append(&payload), false).unwrap() else {
+                panic!("{conversation_id} was decoded as an agent run");
+            };
+            let run_inference_client_message::Message::RunRequest(request) =
+                decoded.message.message.unwrap()
+            else {
+                panic!("{conversation_id} was not a run request");
+            };
+            assert_eq!(request.conversation_id, conversation_id);
+            assert_eq!(
+                request.requested_model.unwrap().model_id,
+                "8e1a15e48503a207"
+            );
+        }
+    }
+
+    #[test]
+    fn captured_cursor_3_27_run_request_decodes_as_inference() {
+        let payload = include_bytes!("../../cursor/testdata/cursor_3_27_run_inference.bin");
+        let DecodedBidi::Inference(decoded) = decode(&append(payload), false).unwrap() else {
+            panic!("captured Cursor 3.27 append was decoded as an agent run");
+        };
+        let run_inference_client_message::Message::RunRequest(request) =
+            decoded.message.message.unwrap()
+        else {
+            panic!("captured append was not a run request");
+        };
+        assert_eq!(
+            request.conversation_id,
+            "5e7c3aa2-f7f2-46b1-a756-c60b1b98123c"
+        );
+        let model = request.requested_model.unwrap();
+        assert_eq!(model.model_id, "8e1a15e48503a207");
+        assert!(model
+            .parameters
+            .iter()
+            .any(|parameter| { parameter.id == "reasoning" && parameter.value == "high" }));
+    }
+
+    #[test]
+    fn invoke_model_is_inference_when_agent_decode_fails() {
+        let message = RunInferenceClientMessage {
+            message: Some(run_inference_client_message::Message::InvokeModel(
+                RunInferenceInvokeModel {
+                    invocation_id: "invoke-1".into(),
+                    request: Some(crate::cursor::protocol::inference::InferenceStreamRequest {
+                        messages: vec![InferenceCoreMessage {
+                            role: 1,
+                            content: Some(inference_core_message::Content::Parts(
+                                InferenceContentParts {
+                                    parts: vec![
+                                        InferenceContentPart {
+                                            part: Some(inference_content_part::Part::Text(
+                                                InferenceTextPart {
+                                                    text: "What is the dominant color?".into(),
+                                                },
+                                            )),
+                                        },
+                                        InferenceContentPart {
+                                            part: Some(inference_content_part::Part::Image(
+                                                InferenceImagePart {
+                                                    data: "data:image/png;base64,AQID".into(),
+                                                    mime_type: None,
+                                                },
+                                            )),
+                                        },
+                                    ],
+                                },
+                            )),
+                            tool_calls: Vec::new(),
+                        }],
+                    }),
+                },
+            )),
+        };
+        let mut payload = Vec::new();
+        message.encode(&mut payload).unwrap();
+        let DecodedBidi::Inference(decoded) = decode(&append(&payload), false).unwrap() else {
+            panic!("invoke_model was decoded as an agent message");
+        };
+        let history = crate::cursor::inference::project_messages(match &decoded.message.message {
+            Some(run_inference_client_message::Message::InvokeModel(invoke)) => {
+                &invoke.request.as_ref().unwrap().messages
+            }
+            _ => panic!("expected invoke_model"),
+        })
+        .unwrap();
+        let crate::model::ProjectedContent::Parts(parts) = &history[0].content else {
+            panic!("user image turn was not projected as parts");
+        };
+        assert!(matches!(
+            &parts[1],
+            crate::model::ContentPart::Image { mime_type, data }
+                if mime_type == "image/png" && data == &vec![1, 2, 3]
+        ));
+    }
 }

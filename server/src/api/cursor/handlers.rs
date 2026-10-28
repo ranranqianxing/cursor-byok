@@ -47,6 +47,10 @@ fn router_with_proxy(
     Router::new()
         .route("/__byok-api__/healthz", get(health))
         .route("/agent.v1.AgentService/RunSSE", post(run_sse_handler))
+        .route(
+            "/aiserver.v1.InferenceService/RunInferenceSSE",
+            post(run_inference_sse_handler),
+        )
         .route("/aiserver.v1.BidiService/BidiAppend", post(bidi_handler))
         .route(
             "/aiserver.v1.AiService/AvailableDocs",
@@ -193,6 +197,23 @@ async fn run_sse_handler(
     Extension(proxy): Extension<CursorProxy>,
     request: Request<Body>,
 ) -> Result<Response<Body>> {
+    sse_handler(registry, proxy, request, true).await
+}
+
+async fn run_inference_sse_handler(
+    State(registry): State<TransportRegistry>,
+    Extension(proxy): Extension<CursorProxy>,
+    request: Request<Body>,
+) -> Result<Response<Body>> {
+    sse_handler(registry, proxy, request, false).await
+}
+
+async fn sse_handler(
+    registry: TransportRegistry,
+    proxy: CursorProxy,
+    request: Request<Body>,
+    bind_agent_runtime: bool,
+) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: agent::BidiRequestId = connect::decode_unary(&body)?;
     let route = registry.wait_route(&request.request_id).await;
@@ -204,8 +225,14 @@ async fn run_sse_handler(
         serde_json::json!({"request_id": request.request_id}),
     );
     match route {
-        crate::cursor::transport::TransportRoute::Local => {
+        crate::cursor::transport::TransportRoute::Local if bind_agent_runtime => {
             run_sse::stream(&registry, &request.request_id).await
+        }
+        crate::cursor::transport::TransportRoute::Local => {
+            let handle = registry.local(&request.request_id).await.ok_or_else(|| {
+                crate::Error::Protocol("RunInference transport is not open".into())
+            })?;
+            run_sse::subscribe(handle).await
         }
         crate::cursor::transport::TransportRoute::Upstream(generation) => {
             let response = proxy::forward(
@@ -232,7 +259,33 @@ async fn bidi_handler(
 ) -> Result<Response<Body>> {
     let (parts, body) = buffered(request).await?;
     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
-    let decoded = bidi::decode(&request)?;
+    let request_id = request
+        .request_id
+        .as_ref()
+        .map(|id| id.request_id.as_str())
+        .unwrap_or("");
+    let known_inference = registry.has_inference(request_id).await;
+    let decoded = match bidi::decode(&request, known_inference)? {
+        bidi::DecodedBidi::Inference(decoded) => {
+            return match crate::cursor::inference::accept(
+                &registry,
+                &decoded.request_id,
+                decoded.message,
+            )
+            .await?
+            {
+                crate::cursor::inference::Disposition::Handled => Ok(proto_ok()),
+                crate::cursor::inference::Disposition::Upstream => {
+                    proxy::forward(
+                        Extension(proxy),
+                        Request::from_parts(parts, Body::from(body)),
+                    )
+                    .await
+                }
+            };
+        }
+        bidi::DecodedBidi::Agent(decoded) => *decoded,
+    };
     let first_model = decoded.model_id().map(str::to_owned);
     let conversation_id = decoded.conversation_id().map(str::to_owned);
     let trace_metadata = decoded.trace_metadata();
@@ -335,13 +388,17 @@ async fn bidi_handler(
             return Err(error);
         }
     }
+    Ok(proto_ok())
+}
+
+fn proto_ok() -> Response<Body> {
     let mut response = Response::new(axum::body::Body::empty());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/proto"),
     );
-    Ok(response)
+    response
 }
 
 fn trace_outcome(

@@ -510,6 +510,44 @@ mod tests {
     }
 
     #[test]
+    fn inference_image_data_url_becomes_an_openai_image_url() {
+        use crate::cursor::protocol::inference::{
+            inference_content_part, inference_core_message, InferenceContentPart,
+            InferenceContentParts, InferenceCoreMessage, InferenceImagePart, InferenceTextPart,
+        };
+
+        let history = crate::cursor::inference::project_messages(&[InferenceCoreMessage {
+            role: 1,
+            content: Some(inference_core_message::Content::Parts(
+                InferenceContentParts {
+                    parts: vec![
+                        InferenceContentPart {
+                            part: Some(inference_content_part::Part::Text(InferenceTextPart {
+                                text: "What is the dominant color of this image?".into(),
+                            })),
+                        },
+                        InferenceContentPart {
+                            part: Some(inference_content_part::Part::Image(InferenceImagePart {
+                                data: "data:image/png;base64,AQID".into(),
+                                mime_type: None,
+                            })),
+                        },
+                    ],
+                },
+            )),
+            tool_calls: Vec::new(),
+        }])
+        .unwrap();
+        let messages = openai_chat_messages("", &history).unwrap();
+        assert_eq!(messages[0]["content"][0]["type"], "text");
+        assert_eq!(messages[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            messages[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AQID"
+        );
+    }
+
+    #[test]
     fn user_images_are_openai_chat_image_url_parts() {
         let messages = openai_chat_messages(
             "",
