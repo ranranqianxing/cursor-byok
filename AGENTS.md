@@ -23,3 +23,11 @@
 - For stateful or concurrent behavior, show timing, ownership, state boundaries, and before/during/after behavior explicitly. Distinguish continuation within the same lifecycle from creation of a new lifecycle.
 - Prefer compact trees, flow diagrams, state matrices, and mappings when they communicate the structure more clearly than paragraphs.
 - Tie recommendations to the actual repository structure and code. Do not present a speculative target architecture as if it already exists.
+
+## Cursor Cloud specific instructions
+
+- Install the Tauri Linux libraries before any Cargo command. `apps/desktop/src-tauri` is a workspace member, so `cargo test` and `cargo clippy` need `libwebkit2gtk-4.1-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, and `patchelf`.
+- Use Rust stable with `rustfmt` and `clippy`. Frontend dependencies are Node.js 22 and `npm ci` in `apps/desktop`.
+- `make dev-web` is the local console. The Rust server listens on `127.0.0.1:3000`, Vite listens on `127.0.0.1:1420`, and the UI is `http://127.0.0.1:3000/__byok-api__/`. `GET /__byok-api__/healthz` returns HTTP 204.
+- `make check` is the full gate: format, Clippy, workspace tests, and `npm --prefix apps/desktop run check`.
+- Model data is stored in `~/.cursor-byok-v3` unless `CURSOR_DATABASE_URL` is set. Initializing the local CA and turning on Cursor takeover writes `~/.config/Cursor/User/settings.json` and installs a system CA. Turn takeover off before leaving the machine so those proxy settings are removed.
