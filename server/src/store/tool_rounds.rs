@@ -3,8 +3,9 @@ use sqlx::Row;
 
 use crate::{
     model::{
-        CanonicalMessage, CheckpointId, ConversationId, MessageContent, Origin, Role, RunId,
-        ToolCall, ToolCallContent, ToolResult, ToolResultContent, ToolRoundAssistant, ToolRoundId,
+        CanonicalMessage, CheckpointId, ContentPart, ConversationId, MessageContent, Origin, Role,
+        RunId, ToolCall, ToolCallContent, ToolResult, ToolResultContent, ToolRoundAssistant,
+        ToolRoundId,
     },
     Error, Result,
 };
@@ -194,6 +195,18 @@ impl Store {
             },
             runtime_event_id: None,
         };
+        let provider_parts = if result.inline_images.is_empty() {
+            Vec::new()
+        } else {
+            std::iter::once(ContentPart::Text {
+                text: result.content.clone(),
+            })
+            .chain(result.inline_images.iter().map(|image| ContentPart::Image {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+            }))
+            .collect()
+        };
         let result_message = CanonicalMessage {
             message_id: format!("{}:{}:result", round_id, result.call_id),
             role: Role::Tool,
@@ -204,7 +217,7 @@ impl Store {
                 content: result.content.clone(),
                 is_error: result.is_error,
                 image: result.image.clone(),
-                provider_parts: Vec::new(),
+                provider_parts,
             }),
             runtime_event_id: None,
         };

@@ -21,7 +21,7 @@ use crate::{
     Error, Result,
 };
 
-use super::{break_messages, context, insert_messages, model};
+use super::{break_messages, context, images, insert_messages, model};
 
 struct ActionProjection {
     mode: i32,
@@ -294,6 +294,30 @@ pub(crate) async fn prepare(
             }
         }
     };
+    if !compacting {
+        if let Some(history) = request
+            .action
+            .as_ref()
+            .and_then(|action| action.action.as_ref())
+            .and_then(|action| match action {
+                pb::conversation_action::Action::UserMessageAction(action) => {
+                    action.conversation_history.as_ref()
+                }
+                _ => None,
+            })
+        {
+            let mut index = images::ImageIndex::default();
+            images::index_images(base_messages.as_deref().unwrap_or_default(), &mut index);
+            images::index_images(&initial_messages, &mut index);
+            if let Some(message) = images::missing_history_message(&index, history)? {
+                let position = initial_messages
+                    .iter()
+                    .rposition(|message| message.origin == Origin::Runtime)
+                    .unwrap_or(initial_messages.len());
+                initial_messages.insert(position, message);
+            }
+        }
+    }
     let (base_checkpoint_id, reused) = store
         .match_checkpoint_prefix(&conversation_id, base_checkpoint_id, &initial_messages)
         .await?;

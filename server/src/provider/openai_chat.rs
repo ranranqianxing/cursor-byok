@@ -240,6 +240,10 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
     if !instructions.is_empty() {
         output.push(json!({"role": "system", "content": instructions}));
     }
+    // Deepseek (and the OpenAI chat vision subset it documents) accepts images
+    // only on user messages. Tool and assistant images are held and attached
+    // to the next user message so a screenshot still reaches the model.
+    let mut hoisted: Vec<ContentPart> = Vec::new();
     for message in messages {
         let mut value = Map::new();
         value.insert(
@@ -248,7 +252,22 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
         );
         match &message.content {
             ProjectedContent::Parts(parts) => {
-                value.insert("content".into(), chat_content(&message.role, parts)?);
+                let parts = if message.role == Role::User {
+                    let mut parts = parts.clone();
+                    parts.append(&mut hoisted);
+                    parts
+                } else {
+                    let (text, images) = split_images(parts);
+                    hoisted.extend(images);
+                    text
+                };
+                if parts.iter().all(|part| match part {
+                    ContentPart::Text { text } => text.is_empty(),
+                    ContentPart::Image { .. } => false,
+                }) {
+                    continue;
+                }
+                value.insert("content".into(), chat_content(&message.role, &parts)?);
             }
             ProjectedContent::Assistant {
                 text,
@@ -293,20 +312,35 @@ fn openai_chat_messages(instructions: &str, messages: &[ProjectedMessage]) -> Re
                 }
             }
             ProjectedContent::ToolResult(result) => {
-                value.insert(
-                    "content".into(),
-                    if result.provider_parts.is_empty() {
-                        Value::String(result.content.clone())
-                    } else {
-                        chat_content(&Role::User, &result.provider_parts)?
-                    },
-                );
+                hoisted.extend(result.provider_parts.iter().filter_map(|part| match part {
+                    ContentPart::Image { .. } => Some(part.clone()),
+                    ContentPart::Text { .. } => None,
+                }));
+                value.insert("content".into(), Value::String(result.content.clone()));
                 value.insert("tool_call_id".into(), Value::String(result.call_id.clone()));
             }
         }
         output.push(Value::Object(value));
     }
+    if !hoisted.is_empty() {
+        output.push(json!({
+            "role": "user",
+            "content": chat_content(&Role::User, &hoisted)?,
+        }));
+    }
     Ok(output)
+}
+
+fn split_images(parts: &[ContentPart]) -> (Vec<ContentPart>, Vec<ContentPart>) {
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        match part {
+            ContentPart::Image { .. } => images.push(part.clone()),
+            ContentPart::Text { .. } => text.push(part.clone()),
+        }
+    }
+    (text, images)
 }
 
 fn chat_content(_role: &Role, parts: &[ContentPart]) -> Result<Value> {
@@ -327,15 +361,16 @@ fn chat_content(_role: &Role, parts: &[ContentPart]) -> Result<Value> {
     Ok(Value::Array(
         parts
             .iter()
-            .map(|part| match part {
-                ContentPart::Text { text } => Ok(json!({"type":"text", "text":text})),
-                ContentPart::Image { mime_type, data } => Ok(json!({
+            .filter_map(|part| match part {
+                ContentPart::Text { text } if text.is_empty() => None,
+                ContentPart::Text { text } => Some(Ok(json!({"type":"text", "text":text}))),
+                ContentPart::Image { mime_type, data } => Some(Ok(json!({
                     "type":"image_url",
                     "image_url":{"url":format!(
                         "data:{mime_type};base64,{}",
                         STANDARD.encode(data)
                     )},
-                })),
+                }))),
             })
             .collect::<Result<Vec<_>>>()?,
     ))
@@ -465,5 +500,79 @@ mod tests {
     fn a_truncated_response_stays_truncated_even_with_tool_calls() {
         assert_eq!(map_finish("length", true), FinishReason::Length);
         assert_eq!(map_finish("length", false), FinishReason::Length);
+    }
+
+    fn image_part() -> ContentPart {
+        ContentPart::Image {
+            mime_type: "image/png".into(),
+            data: vec![1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn user_images_are_openai_chat_image_url_parts() {
+        let messages = openai_chat_messages(
+            "",
+            &[ProjectedMessage {
+                message_id: "user".into(),
+                role: Role::User,
+                content: ProjectedContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is in this image?".into(),
+                    },
+                    image_part(),
+                ]),
+            }],
+        )
+        .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"][0]["type"], "text");
+        assert_eq!(messages[0]["content"][1]["type"], "image_url");
+        assert_eq!(
+            messages[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AQID"
+        );
+    }
+
+    #[test]
+    fn tool_images_move_onto_a_user_message_for_chat_vision() {
+        let messages = openai_chat_messages(
+            "",
+            &[
+                ProjectedMessage {
+                    message_id: "user".into(),
+                    role: Role::User,
+                    content: ProjectedContent::Parts(vec![ContentPart::Text {
+                        text: "check the page".into(),
+                    }]),
+                },
+                ProjectedMessage {
+                    message_id: "tool".into(),
+                    role: Role::Tool,
+                    content: ProjectedContent::ToolResult(crate::model::ToolResultContent {
+                        call_id: "call-1".into(),
+                        name: "CallMcpTool".into(),
+                        content: "screenshot".into(),
+                        is_error: false,
+                        image: None,
+                        provider_parts: vec![
+                            ContentPart::Text {
+                                text: "screenshot".into(),
+                            },
+                            image_part(),
+                        ],
+                    }),
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "screenshot");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"][0]["type"], "image_url");
+        assert_eq!(
+            messages[2]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,AQID"
+        );
     }
 }

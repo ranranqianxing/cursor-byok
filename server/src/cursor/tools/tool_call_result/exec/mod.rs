@@ -4,7 +4,7 @@ mod render;
 
 use crate::{
     cursor::{protocol::proto::agent::v1 as pb, tools::codec as interaction},
-    model::ToolResult,
+    model::{materialize_inline, InlineImage, ToolResult},
     Error, Result,
 };
 
@@ -33,6 +33,7 @@ pub(crate) fn from_exec(
     }
     let call = &pending.call;
     let read_image = read_image(wire_result);
+    let inline_images = inline_images(wire_result, read_image.as_ref());
     let (mut content, is_error) = output::output(wire_result, call)?;
     if let Some(image) = &read_image {
         content = format!("Read image file: {}", image.path);
@@ -99,6 +100,7 @@ pub(crate) fn from_exec(
             content,
             is_error,
             image: None,
+            inline_images,
         },
         tool,
     )
@@ -122,6 +124,36 @@ fn read_image(message: &pb::exec_client_message::Message) -> Option<ReadImage> {
         data: data.clone(),
         path: success.path.clone(),
     })
+}
+
+fn inline_images(
+    message: &pb::exec_client_message::Message,
+    read_image: Option<&ReadImage>,
+) -> Vec<InlineImage> {
+    let mut images = Vec::new();
+    if let Some(image) = read_image {
+        images.push(InlineImage {
+            mime_type: image.mime_type.clone(),
+            data: image.data.clone(),
+        });
+    }
+    let pb::exec_client_message::Message::McpResult(result) = message else {
+        return images;
+    };
+    let Some(pb::mcp_result::Result::Success(success)) = result.result.as_ref() else {
+        return images;
+    };
+    for item in &success.content {
+        let Some(pb::mcp_tool_result_content_item::Content::Image(image)) = item.content.as_ref()
+        else {
+            continue;
+        };
+        let Ok((mime_type, data)) = materialize_inline(image.data.clone(), &image.mime_type) else {
+            continue;
+        };
+        images.push(InlineImage { mime_type, data });
+    }
+    images
 }
 
 fn image_mime_type(data: &[u8]) -> Option<&'static str> {
@@ -160,7 +192,36 @@ pub(crate) fn edit_failure(pending: PendingExec, error: String) -> Result<ToolCo
             content: error,
             is_error: true,
             image: None,
+            inline_images: Vec::new(),
         },
         pb::tool_call::Tool::EditToolCall(tool),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_screenshot_bytes_stay_attached_to_the_tool_result() {
+        let png = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4];
+        let message = pb::exec_client_message::Message::McpResult(pb::McpResult {
+            result: Some(pb::mcp_result::Result::Success(pb::McpSuccess {
+                content: vec![pb::McpToolResultContentItem {
+                    content: Some(pb::mcp_tool_result_content_item::Content::Image(
+                        pb::McpImageContent {
+                            data: png.clone(),
+                            mime_type: "image/png".into(),
+                        },
+                    )),
+                }],
+                is_error: false,
+                structured_content: None,
+            })),
+        });
+        let images = inline_images(&message, None);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, png);
+    }
 }

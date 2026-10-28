@@ -112,6 +112,7 @@ pub(super) fn complete(
             content,
             is_error,
             image: None,
+            inline_images: Vec::new(),
         },
         pb::tool_call::Tool::GetMcpToolsToolCall(pb::GetMcpToolsToolCall {
             args: Some(args),

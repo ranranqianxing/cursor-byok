@@ -84,6 +84,7 @@ pub(crate) fn complete(
             content,
             is_error,
             image: None,
+            inline_images: Vec::new(),
         },
         Tool::McpToolCall(pb::McpToolCall {
             args: Some(pb::McpArgs {

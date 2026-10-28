@@ -4,8 +4,9 @@ use serde_json::Value;
 
 use crate::{
     model::{
-        CanonicalMessage, ContentPart, MessageContent, Origin, RecoveredToolRound, Role, ToolCall,
-        ToolCallContent, ToolResultContent, ToolRoundAssistant, ToolRoundId,
+        image_from_encoded, is_image_mime, CanonicalMessage, ContentPart, MessageContent, Origin,
+        RecoveredToolRound, Role, ToolCall, ToolCallContent, ToolImageReference, ToolResultContent,
+        ToolRoundAssistant, ToolRoundId,
     },
     store::BlobId,
     Error, Result,
@@ -146,16 +147,7 @@ fn decode_text(value: &Value) -> Result<MessageContent> {
             Some("text") => Ok(ContentPart::Text {
                 text: required_string(part, "text")?.into(),
             }),
-            Some("image") => {
-                let mime_type = required_string(part, "mimeType")?;
-                let encoded = required_string(part, "image")?;
-                Ok(ContentPart::Image {
-                    mime_type: mime_type.into(),
-                    data: STANDARD.decode(encoded).map_err(|error| {
-                        Error::Protocol(format!("invalid Cursor image base64: {error}"))
-                    })?,
-                })
-            }
+            Some("image" | "image_url" | "input_image" | "file") => image_part(part),
             Some(kind) => Err(Error::Protocol(format!(
                 "unsupported Cursor message content part: {kind}"
             ))),
@@ -234,21 +226,115 @@ fn decode_tool_result(value: &Value) -> Result<ToolResultContent> {
         .and_then(Value::as_array)
         .and_then(|parts| parts.first())
         .ok_or_else(|| Error::Protocol("Cursor tool message has no result part".into()))?;
+    let content = part
+        .get("result")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let (image, mut provider_parts) = experimental_images(part)?;
+    if !provider_parts.is_empty() {
+        provider_parts.insert(
+            0,
+            ContentPart::Text {
+                text: content.clone(),
+            },
+        );
+    }
     Ok(ToolResultContent {
         call_id: required_string(part, "toolCallId")?.into(),
         name: required_string(part, "toolName")?.into(),
-        content: part
-            .get("result")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .into(),
+        content,
         is_error: part
             .get("isError")
             .and_then(Value::as_bool)
             .unwrap_or(false),
-        image: None,
-        provider_parts: Vec::new(),
+        image,
+        provider_parts,
     })
+}
+
+fn experimental_images(part: &Value) -> Result<(Option<ToolImageReference>, Vec<ContentPart>)> {
+    let Some(items) = part.get("experimental_content").and_then(Value::as_array) else {
+        return Ok((None, Vec::new()));
+    };
+    let mut image = None;
+    let mut parts = Vec::new();
+    for item in items {
+        if let Some("image" | "image_url" | "input_image" | "file") =
+            item.get("type").and_then(Value::as_str)
+        {
+            if let Some(reference) = blob_image(item)? {
+                image.get_or_insert(reference);
+            }
+            if image_payload(item).is_some() {
+                parts.push(image_part(item)?);
+            }
+        }
+    }
+    Ok((image, parts))
+}
+
+fn blob_image(part: &Value) -> Result<Option<ToolImageReference>> {
+    let Some(blob_id) = part.get("blobId").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if blob_id.is_empty() {
+        return Err(Error::Protocol(
+            "Cursor tool image is missing blobId".into(),
+        ));
+    }
+    let mime_type = part
+        .get("mimeType")
+        .or_else(|| part.get("mediaType"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !is_image_mime(mime_type) {
+        return Err(Error::Protocol(format!(
+            "Cursor tool image has invalid MIME type: {mime_type}"
+        )));
+    }
+    Ok(Some(ToolImageReference {
+        blob_id: blob_id.into(),
+        mime_type: mime_type.into(),
+        path: part
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .into(),
+    }))
+}
+
+fn image_part(part: &Value) -> Result<ContentPart> {
+    let kind = part.get("type").and_then(Value::as_str).unwrap_or("image");
+    let hint = part
+        .get("mimeType")
+        .or_else(|| part.get("mediaType"))
+        .or_else(|| part.get("media_type"))
+        .or_else(|| part.pointer("/source/media_type"))
+        .and_then(Value::as_str);
+    if kind == "file" && !hint.is_some_and(is_image_mime) {
+        return Err(Error::Protocol("Cursor file part is not an image".into()));
+    }
+    let payload = image_payload(part)
+        .ok_or_else(|| Error::Protocol("Cursor image part is missing image data".into()))?;
+    let (mime_type, data) = image_from_encoded(payload, hint)?;
+    Ok(ContentPart::Image { mime_type, data })
+}
+
+fn image_payload(part: &Value) -> Option<&str> {
+    ["image", "data", "file_data", "url"]
+        .into_iter()
+        .find_map(|name| string_or_url(part.get(name)))
+        .or_else(|| part.pointer("/image_url/url").and_then(Value::as_str))
+        .or_else(|| string_or_url(part.get("image_url")))
+        .or_else(|| part.pointer("/source/data").and_then(Value::as_str))
+}
+
+fn string_or_url(value: Option<&Value>) -> Option<&str> {
+    let value = value?;
+    value
+        .as_str()
+        .or_else(|| value.get("url").and_then(Value::as_str))
 }
 
 fn required_string<'a>(value: &'a Value, name: &str) -> Result<&'a str> {

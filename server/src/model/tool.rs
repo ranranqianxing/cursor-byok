@@ -46,6 +46,16 @@ pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
     pub image: Option<ToolImageReference>,
+    /// Image bytes captured with this result. They are copied onto the
+    /// canonical tool message and are not part of the tool-result command JSON.
+    #[serde(default, skip)]
+    pub inline_images: Vec<InlineImage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineImage {
+    pub mime_type: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

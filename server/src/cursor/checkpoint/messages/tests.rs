@@ -185,8 +185,84 @@ fn cursor_user_image_uses_image_field() {
 
     let projected = project_messages(&[message]).unwrap();
     let encoded = wire_message(&projected[0], "model", None).unwrap();
-    assert_eq!(encoded["content"][1]["image"], "AQID");
+    assert_eq!(encoded["content"][1]["image"], "data:image/png;base64,AQID");
+    assert_eq!(encoded["content"][1]["mediaType"], "image/png");
     assert!(encoded["content"][1].get("data").is_none());
+    let round_trip = decode(
+        serde_json::to_vec(&encoded).unwrap().as_slice(),
+        "cursor-root:user-image-round-trip".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &round_trip.content,
+        MessageContent::Parts { parts }
+            if parts[1] == ContentPart::Image {
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3],
+            }
+    ));
+}
+
+#[test]
+fn current_cursor_image_part_uses_data_url_and_media_type() {
+    let wire = json!({
+        "role": "user",
+        "id": "user-image",
+        "content": [
+            {"type":"text", "text":"look"},
+            {"type":"image", "image":"data:image/png;base64,AQID", "mediaType":"image/png"},
+        ],
+    });
+    let message = decode(
+        serde_json::to_vec(&wire).unwrap().as_slice(),
+        "cursor-root:user-image-uri".into(),
+    )
+    .unwrap();
+    assert!(matches!(
+        &message.content,
+        MessageContent::Parts { parts }
+            if parts[1] == ContentPart::Image {
+                mime_type: "image/png".into(),
+                data: vec![1, 2, 3],
+            }
+    ));
+}
+
+#[test]
+fn tool_result_experimental_image_round_trips_into_provider_parts() {
+    let wire = json!({
+        "role": "tool",
+        "id": "call-1",
+        "content": [{
+            "type": "tool-result",
+            "toolCallId": "call-1",
+            "toolName": "CallMcpTool",
+            "result": "screenshot",
+            "experimental_content": [
+                {"type":"text", "text":"screenshot"},
+                {"type":"image", "data":"data:image/png;base64,AQID", "mimeType":"image/png"},
+            ],
+        }],
+    });
+    let message = decode(
+        serde_json::to_vec(&wire).unwrap().as_slice(),
+        "cursor-root:tool-image".into(),
+    )
+    .unwrap();
+    let MessageContent::ToolResult(result) = &message.content else {
+        panic!("expected tool result");
+    };
+    assert!(matches!(
+        result.provider_parts.get(1),
+        Some(ContentPart::Image { mime_type, data })
+            if mime_type == "image/png" && data == &vec![1, 2, 3]
+    ));
+    let projected = project_messages(&[message]).unwrap();
+    let encoded = wire_message(&projected[0], "model", None).unwrap();
+    assert_eq!(
+        encoded["content"][0]["experimental_content"][1]["data"],
+        "data:image/png;base64,AQID"
+    );
 }
 
 #[test]

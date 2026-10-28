@@ -401,8 +401,7 @@ fn gate_mcp(tool: &mut pb::McpToolCall) {
         // MCP images are sent to the client as inline binary data. Truncating
         // an encoded image at an arbitrary byte boundary corrupts the image
         // and makes the client's image/screenshot fallback fail. The model
-        // receives only the textual MCP summary below, which is bounded by
-        // MCP_TEXT_LIMIT, so the image does not need this text-result gate.
+        // receives those bytes separately; this gate only bounds text.
         if let Some(pb::mcp_tool_result_content_item::Content::Text(text)) = item.content.as_mut() {
             let original = text.text.clone();
             let next = truncate_text("MCP content item", &original, MCP_TEXT_LIMIT);

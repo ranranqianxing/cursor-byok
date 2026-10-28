@@ -34,6 +34,7 @@ pub(crate) fn failure(call: &ToolCall, error: String) -> Result<ToolCompletion> 
             content: error.clone(),
             is_error: true,
             image: None,
+            inline_images: Vec::new(),
         },
         pb::tool_call::Tool::McpToolCall(pb::McpToolCall {
             args: Some(pb::McpArgs {
