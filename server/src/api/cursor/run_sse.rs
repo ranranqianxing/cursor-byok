@@ -19,6 +19,10 @@ use crate::{
 
 pub async fn stream(registry: &TransportRegistry, request_id: &str) -> Result<Response<Body>> {
     let handle = registry.get_or_create(request_id).await?;
+    subscribe(handle).await
+}
+
+pub async fn subscribe(handle: TransportHandle) -> Result<Response<Body>> {
     let receiver = handle.subscribe();
     let trace = handle.trace().cloned();
     if let Some(trace) = &trace {

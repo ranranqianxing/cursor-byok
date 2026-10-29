@@ -125,6 +125,7 @@ impl ToolCompletion {
                 content: output,
                 is_error,
                 image: None,
+                inline_images: Vec::new(),
             },
             tool,
         ))

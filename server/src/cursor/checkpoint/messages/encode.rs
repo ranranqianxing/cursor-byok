@@ -202,7 +202,8 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
                     ContentPart::Text { text } => json!({"type":"text", "text":text}),
                     ContentPart::Image { mime_type, data } => json!({
                         "type":"image",
-                        "image": STANDARD.encode(data),
+                        "image": data_url(mime_type, data),
+                        "mediaType": mime_type,
                         "mimeType": mime_type,
                     }),
                 })
@@ -244,10 +245,40 @@ fn wire_content(content: &ProjectedContent, model: &str) -> Result<Value> {
             "toolCallId": result.call_id,
             "toolName": result.name,
             "result": result.content,
-            "experimental_content": [{"type":"text", "text":result.content}],
+            "experimental_content": experimental_content(result),
             "isError": result.is_error,
         }]),
     })
+}
+
+fn experimental_content(result: &crate::model::ToolResultContent) -> Vec<Value> {
+    let mut parts = vec![json!({"type":"text", "text":result.content})];
+    for part in &result.provider_parts {
+        if let ContentPart::Image { mime_type, data } = part {
+            parts.push(json!({
+                "type": "image",
+                "data": data_url(mime_type, data),
+                "mimeType": mime_type,
+                "mediaType": mime_type,
+            }));
+        }
+    }
+    if parts.len() == 1 {
+        if let Some(image) = &result.image {
+            parts.push(json!({
+                "type": "image",
+                "mimeType": image.mime_type,
+                "mediaType": image.mime_type,
+                "blobId": image.blob_id,
+                "path": image.path,
+            }));
+        }
+    }
+    parts
+}
+
+fn data_url(mime_type: &str, data: &[u8]) -> String {
+    format!("data:{mime_type};base64,{}", STANDARD.encode(data))
 }
 
 fn encode_replay_state(replay_state: &crate::model::ProviderReplayState) -> Result<String> {

@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, Mutex, Notify};
 
 use crate::{
     cursor::{
-        conversation::ConversationRegistry, prompting::PromptCompiler,
-        services::observability::CursorTraceService,
+        conversation::ConversationRegistry, inference::Session, prompting::PromptCompiler,
+        services::observability::CursorTraceService, TransportCommand,
     },
     plugin::PluginRegistry,
     provider::Provider,
@@ -39,12 +39,23 @@ struct RegistryInner {
     web_cache: WebCache,
     plugins: Option<PluginRegistry>,
     conversations: ConversationRegistry,
+    inference: Mutex<HashMap<String, Session>>,
 }
 
 #[derive(Clone)]
 struct LocalTransport {
     generation: u64,
     handle: TransportHandle,
+}
+
+pub(crate) struct DetachedTransport {
+    pub handle: TransportHandle,
+    pub commands: Option<mpsc::Receiver<TransportCommand>>,
+}
+
+struct InsertedLocal {
+    handle: TransportHandle,
+    commands: Option<mpsc::Receiver<TransportCommand>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +138,7 @@ impl TransportRegistry {
                 store,
                 web_cache,
                 plugins,
+                inference: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -163,10 +175,56 @@ impl TransportRegistry {
         request_id: &str,
         replace_closing: bool,
     ) -> Result<TransportHandle> {
+        let inserted = self.insert_local(request_id, replace_closing).await?;
+        if let Some(receiver) = inserted.commands {
+            self.inner
+                .conversations
+                .bind_transport(inserted.handle.clone(), receiver);
+        }
+        Ok(inserted.handle)
+    }
+
+    /// Opens a local transport without the agent conversation runtime.
+    ///
+    /// Cursor 3.27 inference runs emit `RunInferenceServerMessage` frames on
+    /// this handle. Binding `ConversationRuntime` would decode those appends
+    /// as agent checkpoints and write agent frames onto the same stream.
+    pub(crate) async fn open_detached(&self, request_id: &str) -> Result<DetachedTransport> {
+        let inserted = self.insert_local(request_id, false).await?;
+        Ok(DetachedTransport {
+            handle: inserted.handle,
+            commands: inserted.commands,
+        })
+    }
+
+    pub(crate) async fn has_inference(&self, request_id: &str) -> bool {
+        self.inner.inference.lock().await.contains_key(request_id)
+    }
+
+    pub(crate) async fn inference_session(&self, request_id: &str) -> Option<Session> {
+        self.inner.inference.lock().await.get(request_id).cloned()
+    }
+
+    pub(crate) async fn insert_inference(&self, request_id: String, session: Session) {
+        self.inner
+            .inference
+            .lock()
+            .await
+            .insert(request_id, session);
+    }
+
+    pub(crate) async fn remove_inference(&self, request_id: &str) {
+        self.inner.inference.lock().await.remove(request_id);
+    }
+
+    async fn insert_local(&self, request_id: &str, replace_closing: bool) -> Result<InsertedLocal> {
         let mut local = self.inner.local.lock().await;
         if let Some(transport) = local.get(request_id) {
             if transport.handle.accepting_appends() || !replace_closing {
-                return Ok(transport.handle.clone());
+                return Ok(InsertedLocal {
+                    handle: transport.handle.clone(),
+                    commands: None,
+                });
             }
         }
         local.remove(request_id);
@@ -188,26 +246,26 @@ impl TransportRegistry {
         );
         drop(local);
         self.inner.route_changed.notify_waiters();
-        self.inner
-            .conversations
-            .bind_transport(handle.clone(), receiver);
 
         let registry = Arc::downgrade(&self.inner);
-        let request_id = request_id.to_string();
+        let owned_id = request_id.to_string();
         let lifecycle = handle.clone();
         tokio::spawn(async move {
             lifecycle.wait_transport_closed().await;
             if let Some(registry) = registry.upgrade() {
                 let mut local = registry.local.lock().await;
                 if local
-                    .get(&request_id)
+                    .get(&owned_id)
                     .is_some_and(|transport| transport.generation == generation)
                 {
-                    local.remove(&request_id);
+                    local.remove(&owned_id);
                 }
             }
         });
-        Ok(handle)
+        Ok(InsertedLocal {
+            handle,
+            commands: Some(receiver),
+        })
     }
 
     pub async fn local(&self, request_id: &str) -> Option<TransportHandle> {

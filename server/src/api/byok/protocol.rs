@@ -1,4 +1,3 @@
-use base64::Engine;
 use serde_json::Value;
 
 use crate::{
@@ -136,43 +135,36 @@ fn parse_parts(value: Option<&Value>) -> Result<Vec<ContentPart>> {
                 "text" | "input_text" | "output_text" => Ok(ContentPart::Text {
                     text: required_string(part, "text")?.into(),
                 }),
-                "image_url" | "input_image" | "image" => {
-                    let url = part
-                        .pointer("/image_url/url")
-                        .or_else(|| part.get("image_url"))
-                        .or_else(|| part.pointer("/source/data"))
-                        .and_then(Value::as_str)
+                "image_url" | "input_image" | "image" | "file" => {
+                    let hint = part
+                        .get("mimeType")
+                        .or_else(|| part.get("mediaType"))
+                        .or_else(|| part.get("media_type"))
+                        .or_else(|| part.pointer("/source/media_type"))
+                        .and_then(Value::as_str);
+                    if kind == "file" && !hint.is_some_and(crate::model::is_image_mime) {
+                        return Err(Error::Protocol("file content is not an image".into()));
+                    }
+                    let payload = ["image_url", "image", "data", "url"]
+                        .into_iter()
+                        .find_map(|name| image_payload_string(part.get(name)))
+                        .or_else(|| part.pointer("/image_url/url").and_then(Value::as_str))
+                        .or_else(|| part.pointer("/source/data").and_then(Value::as_str))
                         .ok_or_else(|| Error::Protocol("image data URL is required".into()))?;
-                    let data_url = if url.starts_with("data:") {
-                        url.to_owned()
-                    } else if let Some(mime) =
-                        part.pointer("/source/media_type").and_then(Value::as_str)
-                    {
-                        format!("data:{mime};base64,{url}")
-                    } else {
-                        return Err(Error::Protocol(
-                            "only base64 image data URLs are supported".into(),
-                        ));
-                    };
-                    let (prefix, encoded) = data_url
-                        .split_once(',')
-                        .ok_or_else(|| Error::Protocol("invalid image data URL".into()))?;
-                    let mime_type = prefix
-                        .strip_prefix("data:")
-                        .and_then(|prefix| prefix.strip_suffix(";base64"))
-                        .ok_or_else(|| Error::Protocol("invalid image data URL".into()))?;
-                    let data = base64::engine::general_purpose::STANDARD
-                        .decode(encoded)
-                        .map_err(|_| Error::Protocol("invalid base64 image".into()))?;
-                    Ok(ContentPart::Image {
-                        mime_type: mime_type.into(),
-                        data,
-                    })
+                    let (mime_type, data) = crate::model::image_from_encoded(payload, hint)?;
+                    Ok(ContentPart::Image { mime_type, data })
                 }
                 _ => Err(Error::Protocol(format!("unsupported content type: {kind}"))),
             }
         })
         .collect()
+}
+
+fn image_payload_string(value: Option<&Value>) -> Option<&str> {
+    let value = value?;
+    value
+        .as_str()
+        .or_else(|| value.get("url").and_then(Value::as_str))
 }
 
 fn parse_chat_messages(

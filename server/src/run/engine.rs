@@ -980,6 +980,13 @@ async fn hydrate_tool_images(
         let ProjectedContent::ToolResult(result) = &mut message.content else {
             continue;
         };
+        if result
+            .provider_parts
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+        {
+            continue;
+        }
         let Some(image) = &result.image else {
             continue;
         };

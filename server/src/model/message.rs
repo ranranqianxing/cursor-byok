@@ -39,7 +39,9 @@ pub struct ToolResultContent {
     pub is_error: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImageReference>,
-    #[serde(skip)]
+    /// Inline image bytes for the provider. Empty results omit the field so
+    /// existing checkpoint digests stay unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_parts: Vec<ContentPart>,
 }
 

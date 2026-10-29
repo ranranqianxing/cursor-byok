@@ -3,6 +3,7 @@
 mod checkpoint;
 mod configuration;
 mod conversation;
+mod image_data;
 mod inference;
 mod message;
 mod observability;
@@ -15,6 +16,7 @@ mod tool_result_replay;
 pub use checkpoint::*;
 pub use configuration::*;
 pub use conversation::*;
+pub(crate) use image_data::{image_from_encoded, is_image_mime, materialize_inline};
 pub use inference::*;
 pub use message::*;
 pub use observability::*;
