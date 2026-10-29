@@ -248,9 +248,12 @@ jobs:
           mkdir -p tauri-update
           release_id=$(
             gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              --jq ".[] | select(.tag_name == \"v${VERSION}\") | .id"
+              --jq "[.[] | select(.tag_name == \"v${VERSION}\")] | max_by(.id) | .id // empty"
           )
-          test -n "${release_id}"
+          if [ -z "${release_id}" ]; then
+            echo "::error::No GitHub release found for tag v${VERSION}" >&2
+            exit 1
+          fi
           gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}" > tauri-update/release.json
           asset_id=$(node -p 'require("./tauri-update/release.json").assets.find(({ name }) => name === "latest.json")?.id ?? ""')
           test -n "${asset_id}"
