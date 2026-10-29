@@ -33,7 +33,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwNDg4NTBDQUY0QjVCNUEKUldSYVcwdXZESVZJMEtWWmNaK0ttSHJ3TVVtSXoyVDZhSDh3Q0NEc3pJbkdlL0ZBZVQyQWR2Y0QK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwM0E4MDFDRjM2MDc0NzcKUldSM2RHRHpISUE2VUhVc1lReHZ2ek5LbUl2UFRqd0c1ZWFlamh2bXJLalV4c2dTR0pPWWpOeDgK",
       "endpoints": [
         "https://github.com/ranranqianxing/cursor-byok/releases/latest/download/latest.json"
       ],
