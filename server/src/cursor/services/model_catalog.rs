@@ -491,24 +491,10 @@ fn available_model(model: &ModelConfig) -> AvailableModel {
             id: 6,
             display_name: "Cursor".into(),
         }),
-        model_picker_badges: vec![ModelPickerBadge {
-            label: model
-                .group_name
-                .clone()
-                .unwrap_or_else(|| provider_host(&model.base_url)),
-            variant: 1,
-            dismiss_on_selection: false,
-        }],
+        // Cursor 把 model_picker_badges 画成名称旁的蓝色胶囊（分组名或 base_url 主机名）。
+        // 留空后选择器只显示 client_display_name；路由仍用 name / server_model_name。
+        model_picker_badges: Vec::new(),
     }
-}
-
-/// 徽章回退标签:base_url 的主机名。入库时已校验为带主机的 HTTP(S) URL,
-/// 解析失败仅是理论分支,此时原样返回 base_url。
-fn provider_host(base_url: &str) -> String {
-    reqwest::Url::parse(base_url.trim())
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_lowercase))
-        .unwrap_or_else(|| base_url.trim().into())
 }
 
 fn model_parameters(
@@ -728,11 +714,7 @@ fn available_plugin_model(model: &PluginModelDescriptor) -> AvailableModel {
             id: 6,
             display_name: model.provider_type.clone(),
         }),
-        model_picker_badges: vec![ModelPickerBadge {
-            label: model.plugin_name.clone(),
-            variant: 1,
-            dismiss_on_selection: false,
-        }],
+        model_picker_badges: Vec::new(),
     }
 }
 
@@ -841,6 +823,61 @@ mod tests {
         };
         assert_eq!(credentials.api_key, CLI_LOCAL_MODEL_API_KEY);
         assert_eq!(credentials.base_url, None);
+    }
+
+    #[test]
+    fn picker_catalog_omits_badges_and_keeps_routing_ids() {
+        let mut config = model();
+        config.display_name = "deepseek flash".into();
+        config.group_name = Some("Work".into());
+        config.base_url = "https://OPPO-CLOUD-LLM-PERSONAL-CN.oppoer.me/v1".into();
+
+        let published = available_model(&config);
+        assert!(published.model_picker_badges.is_empty());
+        assert_eq!(
+            published.client_display_name.as_deref(),
+            Some("deepseek flash")
+        );
+        assert_eq!(
+            published.inputbox_short_model_name.as_deref(),
+            Some("deepseek flash")
+        );
+        assert_eq!(published.name, "local-model-hash");
+        assert_eq!(
+            published.server_model_name.as_deref(),
+            Some("local-model-hash")
+        );
+
+        let encoded = String::from_utf8_lossy(&published.encode_to_vec()).into_owned();
+        assert!(encoded.contains("deepseek flash"));
+        assert!(encoded.contains("local-model-hash"));
+        assert!(!encoded.to_ascii_lowercase().contains("oppoer"));
+        assert!(!encoded.contains("Work"));
+
+        let plugin = available_plugin_model(&PluginModelDescriptor {
+            id: "plugin:test/provider/model".into(),
+            plugin_id: "plugin:test".into(),
+            plugin_name: "API.DEEPSEEK.COM".into(),
+            provider_id: "provider".into(),
+            model_id: "model".into(),
+            display_name: "Plugin Model".into(),
+            description: None,
+            icon: String::new(),
+            provider_type: "test".into(),
+            max_output_tokens: None,
+            images: false,
+            enabled: true,
+        });
+        assert!(plugin.model_picker_badges.is_empty());
+        assert_eq!(plugin.name, "plugin:test/provider/model");
+        assert_eq!(
+            plugin.server_model_name.as_deref(),
+            Some("plugin:test/provider/model")
+        );
+        assert_eq!(plugin.client_display_name.as_deref(), Some("Plugin Model"));
+        let plugin_encoded = String::from_utf8_lossy(&plugin.encode_to_vec()).into_owned();
+        assert!(!plugin_encoded.contains("API.DEEPSEEK.COM"));
+        assert!(plugin_encoded.contains("plugin:test/provider/model"));
     }
 
     #[test]
